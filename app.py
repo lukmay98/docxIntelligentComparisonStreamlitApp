@@ -1,63 +1,97 @@
 import streamlit as st
 import docx
-import difflib
+from docx.enum.text import WD_COLOR_INDEX
+from difflib import SequenceMatcher
+import io
 
-# Seite konfigurieren
-st.set_page_config(page_title="Docx Vergleicher", layout="wide")
-st.title("📄 Intelligenter Word-Dokumentenvergleich")
-st.write("Vergleiche zwei Versionen einer .docx-Datei. Der Algorithmus erkennt Einfügungen und Löschungen, ohne den Rhythmus des restlichen Dokuments zu verlieren.")
+# -- UI KONFIGURATION --
+st.set_page_config(page_title="DocFusion Pro", layout="wide")
 
-# Funktion zum Extrahieren von Text aus Word-Dateien
-def read_docx(file):
+st.markdown("""
+    <style>
+    .diff-box { padding: 10px; border-radius: 5px; border: 1px solid #ddd; height: 400px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; }
+    .add { background-color: #d4edda; text-decoration: underline; }
+    .rem { background-color: #f8d7da; text-decoration: line-through; }
+    </style>
+""", unsafe_allow_html=True)
+
+# -- FUNKTIONEN --
+def reset_app():
+    for key in st.session_state.keys():
+        del st.session_state[key]
+
+def get_text(file):
     doc = docx.Document(file)
-    # Extrahiere jeden Absatz und behalte die Zeilenstruktur bei
-    full_text = []
-    for para in doc.paragraphs:
-        full_text.append(para.text)
-    return full_text
+    return [p.text for p in doc.paragraphs if p.text.strip() != ""]
 
-# Upload-Bereich für zwei (oder mehr) Dateien
-col1, col2 = st.columns(2)
-with col1:
-    file1 = st.file_uploader("Original-Dokument (Version 1)", type=["docx"])
-with col2:
-    file2 = st.file_uploader("Geändertes Dokument (Version 2)", type=["docx"])
+def create_fused_docx(base_text, new_text):
+    matcher = SequenceMatcher(None, base_text, new_text)
+    doc = docx.Document()
+    
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            for line in base_text[i1:i2]:
+                doc.add_paragraph(line)
+        elif tag == 'insert':
+            for line in new_text[j1:j2]:
+                p = doc.add_paragraph()
+                run = p.add_run(line)
+                run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        elif tag == 'replace':
+            # Altes löschen (optional), Neues einfügen mit Markierung
+            for line in new_text[j1:j2]:
+                p = doc.add_paragraph()
+                run = p.add_run(f"[EINGEFÜGT]: {line}")
+                run.font.highlight_color = WD_COLOR_INDEX.TURQUOISE
+                
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()
 
-if file1 and file2:
-    with st.spinner("Lese Dokumente und vergleiche intelligent..."):
-        # Text extrahieren
-        text1 = read_docx(file1)
-        text2 = read_docx(file2)
+# -- APP LAYOUT --
+st.title("📑 Intelligent Document Fusion & Comparison")
+
+if 'started' not in st.session_state:
+    col1, col2 = st.columns(2)
+    with col1:
+        f1 = st.file_uploader("Original (V1)", type="docx", key="u1")
+    with col2:
+        f2 = st.file_uploader("Überarbeitung (V2)", type="docx", key="u2")
+    
+    if f1 and f2:
+        t1 = get_text(f1)
+        t2 = get_text(f2)
         
-        # HtmlDiff generiert eine intelligente Side-by-Side Vergleichstabelle
-        # Es vergleicht Zeilen UND erkennt Unterschiede innerhalb der Zeile!
-        differ = difflib.HtmlDiff()
+        # Side-by-Side Ansicht mit Wrapping
+        st.subheader("Detail-Analyse (Intelligente Synchronisation)")
+        c1, c2 = st.columns(2)
         
-        # Erstelle die HTML-Tabelle
-        html_diff = differ.make_table(
-            text1, 
-            text2, 
-            fromdesc=file1.name, 
-            todesc=file2.name,
-            context=True,      # Zeigt nur geänderte Absätze mit etwas Kontext darum
-            numlines=2         # Anzahl der Kontextzeilen
-        )
+        matcher = SequenceMatcher(None, t1, t2)
+        diff_html_1 = ""
+        diff_html_2 = ""
         
-        st.success("Vergleich erfolgreich abgeschlossen!")
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                chunk = "\n".join(t1[i1:i2]) + "\n"
+                diff_html_1 += chunk
+                diff_html_2 += chunk
+            elif tag == 'insert':
+                diff_html_2 += f'<span class="add">{" ".join(t2[j1:j2])}</span>\n'
+            elif tag == 'delete':
+                diff_html_1 += f'<span class="rem">{" ".join(t1[i1:i2])}</span>\n'
+            elif tag == 'replace':
+                diff_html_1 += f'<span class="rem">{" ".join(t1[i1:i2])}</span>\n'
+                diff_html_2 += f'<span class="add">{" ".join(t2[j1:j2])}</span>\n'
+
+        c1.markdown(f'<div class="diff-box">{diff_html_1}</div>', unsafe_allow_html=True)
+        c2.markdown(f'<div class="diff-box">{diff_html_2}</div>', unsafe_allow_html=True)
         
-        # Ein wenig CSS, um die difflib-Tabelle an Streamlit anzupassen
-        custom_css = """
-        <style>
-            table.diff {font-family: Arial, sans-serif; width: 100%; border-collapse: collapse;}
-            table.diff th {background-color: #f0f2f6; padding: 8px;}
-            table.diff td {padding: 6px; border: 1px solid #ddd; vertical-align: top;}
-            .diff_add {background-color: #d4edda; color: #155724;} /* Grün für Neues */
-            .diff_sub {background-color: #f8d7da; color: #721c24;} /* Rot für Gelöschtes */
-            .diff_chg {background-color: #fff3cd; color: #856404;} /* Gelb für Änderungen */
-        </style>
-        """
-        
-        # HTML-Ausgabe direkt in der Streamlit-App rendern
-        st.components.v1.html(custom_css + html_diff, height=700, scrolling=True)
-else:
-    st.info("Bitte lade auf beiden Seiten eine .docx-Datei hoch, um den Vergleich zu starten.")
+        # Fusion & Download
+        st.divider()
+        fused_file = create_fused_docx(t1, t2)
+        st.download_button("Fusioniertes Dokument herunterladen (.docx)", 
+                           data=fused_file, 
+                           file_name="fusion_result.docx",
+                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+st.button("Neuen Vergleich starten", on_click=reset_app, type="primary")
